@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bowel Prep Assistant Interactive</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #avatar-video { width: 640px; height: 480px; background: black; }
+    #status { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Interactive Bowel Prep Assistant</h1>
+  <video id="avatar-video" autoplay playsinline></video>
+  <div id="status">Click "Start Session" to begin.</div>
+  <button id="start-btn">Start Session</button>
+
+  <script>
+    const HEYGEN_API_KEY = "YOUR_HEYGEN_API_KEY"; // Replace with your Heygen API key
+    const AVATAR_ID = "YOUR_AVATAR_ID"; // Replace with your avatar ID
+
+    let pc, sessionId;
+    const videoEl = document.getElementById("avatar-video");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start-btn");
+
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      statusEl.textContent = "Creating session...";
+
+      // 1. Create Heygen live avatar session
+      const sessionRes = await fetch("https://api.heygen.com/v1/live_avatar.create_session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": HEYGEN_API_KEY
+        },
+        body: JSON.stringify({
+          avatar_id: AVATAR_ID,
+          quality: "high",
+          audio: { input: true, output: true }
+        })
+      });
+
+      const sessionData = await sessionRes.json();
+      sessionId = sessionData.session_id;
+      statusEl.textContent = "Session created. Setting up video...";
+
+      // 2. Setup WebRTC connection for video stream
+      pc = new RTCPeerConnection();
+      pc.ontrack = (event) => {
+        videoEl.srcObject = event.streams[0];
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpRes = await fetch(`https://api.heygen.com/v1/live_avatar.sdp/${sessionId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp", "x-api-key": HEYGEN_API_KEY },
+        body: offer.sdp
+      });
+
+      const answerSdp = await sdpRes.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      statusEl.textContent = "Video connected. Starting audio...";
+
+      // 3. Get microphone access and start sending audio to Heygen
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioTrack = stream.getAudioTracks()[0];
+      const sender = pc.addTrack(audioTrack, stream);
+
+      // 4. Setup WebSocket or event polling to receive transcription from Heygen
+      // Note: Heygen currently requires WebSocket connection for live transcripts.
+      // For demo, we'll poll transcript API every 2 seconds (simplified approach)
+      let lastTranscriptId = null;
+
+      async function pollTranscript() {
+        const transcriptRes = await fetch(`https://api.heygen.com/v1/live_avatar.transcripts/${sessionId}`, {
+          headers: { "x-api-key": HEYGEN_API_KEY }
+        });
+        const transcripts = await transcriptRes.json();
+        if (transcripts.length > 0) {
+          const latest = transcripts[transcripts.length - 1];
+          if (latest.id !== lastTranscriptId) {
+            lastTranscriptId = latest.id;
+            const userText = latest.text;
+            statusEl.textContent = "User said: " + userText;
+
+            // 5. Send user text to your backend for GPT reply
+            const gptRes = await fetch("/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: userText })
+            });
+            const gptData = await gptRes.json();
+            const reply = gptData.reply;
+            statusEl.textContent = "Assistant: " + reply;
+
+            // 6. Send GPT reply text back to Heygen to synthesize speech
+            await fetch(`https://api.heygen.com/v1/live_avatar.send_text/${sessionId}`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-api-key": HEYGEN_API_KEY
+              },
+              body: JSON.stringify({ text: reply })
+            });
+          }
+        }
+      }
+
+      setInterval(pollTranscript, 2000);
+      statusEl.textContent = "Ready. Speak to the avatar!";
+    };
+  </script>
+</body>
+</html>
